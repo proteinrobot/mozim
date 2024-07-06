@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::process::{Child, Command};
+use std::{
+    net::Ipv4Addr,
+    process::{Child, Command},
+    str::FromStr,
+};
 
 const TEST_DHCPD_NETNS: &str = "mozim_test";
 pub(crate) const TEST_NIC_CLI: &str = "dhcpcli";
@@ -8,6 +12,7 @@ pub(crate) const TEST_PROXY_MAC1: &str = "00:11:22:33:44:55";
 const TEST_NIC_SRV: &str = "dhcpsrv";
 
 const TEST_DHCP_SRV_IP: &str = "192.0.2.1";
+const TEST_DHCP_LEASEFILE: &str = "/tmp/mozim_test_dhcpd_lease";
 
 pub(crate) const FOO1_STATIC_IP: std::net::Ipv4Addr =
     std::net::Ipv4Addr::new(192, 0, 2, 99);
@@ -19,7 +24,6 @@ const DNSMASQ_OPTS: &str = r#"
 --keep-in-foreground
 --no-daemon
 --conf-file=/dev/null
---dhcp-leasefile=/tmp/mozim_test_dhcpd_lease
 --no-hosts
 --dhcp-host=foo1,192.0.2.99
 --dhcp-host=00:11:22:33:44:55,192.0.2.51
@@ -32,12 +36,55 @@ const DNSMASQ_OPTS: &str = r#"
 --except-interface=lo
 --clear-on-reload
 --listen-address=192.0.2.1
---dhcp-range=192.0.2.2,192.0.2.50,60 --no-ping
+--dhcp-range=192.0.2.2,192.0.2.50,5s --no-ping
 "#;
 
 #[derive(Debug)]
 pub(crate) struct DhcpServerEnv {
     daemon: Child,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct DhcpServerLease {
+    pub expire: u32,
+    pub mac: String,
+    pub ip: Ipv4Addr,
+    pub host_name: String,
+    pub client_id: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParseLeaseErr;
+
+impl std::str::FromStr for DhcpServerLease {
+    type Err = ParseLeaseErr;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+
+        if parts.len() != 5 {
+            return Err(ParseLeaseErr);
+        }
+
+        let expire = parts[0].parse::<u32>().map_err(|_| ParseLeaseErr)?;
+        let mac = parts[1].to_string();
+
+        let ip = Ipv4Addr::from_str(parts[2]).map_err(|_| ParseLeaseErr)?;
+        let host_name = parts[3].to_string();
+        let client_id: Vec<u8> = parts[4]
+            .split(':')
+            .map(|hex| u8::from_str_radix(hex, 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|_| ParseLeaseErr)?;
+
+        Ok(DhcpServerLease {
+            expire,
+            mac,
+            ip,
+            host_name,
+            client_id,
+        })
+    }
 }
 
 impl DhcpServerEnv {
@@ -46,6 +93,16 @@ impl DhcpServerEnv {
         create_test_veth_nics();
         let daemon = start_dhcp_server();
         Self { daemon }
+    }
+
+    pub(crate) fn get_latest_lease() -> Option<DhcpServerLease> {
+        match std::fs::read_to_string(TEST_DHCP_LEASEFILE) {
+            Ok(leases) => match leases.lines().last() {
+                Some(lease) => DhcpServerLease::from_str(lease).ok(),
+                None => None,
+            },
+            Err(_) => None,
+        }
     }
 }
 
@@ -81,13 +138,21 @@ fn create_test_veth_nics() {
     ));
 }
 
+pub fn get_test_veth_cli_mac() -> String {
+    run_cmd(&format!(
+        "ip addr show {TEST_NIC_CLI} | grep link/ether | awk '{{print $2}}'"
+    ))
+    .trim_end()
+    .to_string()
+}
+
 fn remove_test_veth_nics() {
     run_cmd_ignore_failure(&format!("ip link del {TEST_NIC_CLI}"));
 }
 
 fn start_dhcp_server() -> Child {
     let cmd = format!(
-        "ip netns exec {} dnsmasq {}",
+        "ip netns exec {} dnsmasq {} --dhcp-leasefile={TEST_DHCP_LEASEFILE}",
         TEST_DHCPD_NETNS,
         DNSMASQ_OPTS.replace('\n', " ")
     );
@@ -104,14 +169,15 @@ fn start_dhcp_server() -> Child {
 }
 
 fn stop_dhcp_server(daemon: &mut Child) {
-    daemon.kill().expect("Failed to stop DHCP server")
+    daemon.kill().expect("Failed to stop DHCP server");
+    run_cmd(&format!("rm -f {TEST_DHCP_LEASEFILE}"));
 }
 
 fn run_cmd(cmd: &str) -> String {
-    let cmds: Vec<&str> = cmd.split(' ').collect();
     String::from_utf8(
-        Command::new(cmds[0])
-            .args(&cmds[1..])
+        Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
             .output()
             .unwrap_or_else(|_| panic!("failed to execute command {cmd}"))
             .stdout,
@@ -120,9 +186,7 @@ fn run_cmd(cmd: &str) -> String {
 }
 
 fn run_cmd_ignore_failure(cmd: &str) -> String {
-    let cmds: Vec<&str> = cmd.split(' ').collect();
-
-    match Command::new(cmds[0]).args(&cmds[1..]).output() {
+    match Command::new("sh").arg("-c").arg(cmd).output() {
         Ok(o) => String::from_utf8(o.stdout).unwrap_or_default(),
         Err(e) => {
             eprintln!("Failed to execute command {cmd}: {e}");

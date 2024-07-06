@@ -92,10 +92,6 @@ impl DhcpV4Message {
         dhcp_msg.set_flags(v4::Flags::default());
         dhcp_msg.set_xid(self.xid);
 
-        if !self.config.host_name.is_empty() {
-            dhcp_msg.set_sname_str(self.config.host_name.clone());
-        }
-
         if !self.config.src_mac.is_empty() {
             dhcp_msg
                 .set_chaddr(&mac_str_to_u8_array(self.config.src_mac.as_str()));
@@ -116,6 +112,12 @@ impl DhcpV4Message {
                     v4::OptionCode::InterfaceMtu,
                     v4::OptionCode::NTPServers,
                 ]));
+
+            if !self.config.host_name.is_empty() {
+                dhcp_msg.opts_mut().insert(v4::DhcpOption::Hostname(
+                    self.config.host_name.clone(),
+                ));
+            }
         } else if self.msg_type == DhcpV4MessageType::Request {
             dhcp_msg
                 .opts_mut()
@@ -158,6 +160,12 @@ impl DhcpV4Message {
                     v4::OptionCode::InterfaceMtu,
                     v4::OptionCode::NTPServers,
                 ]));
+
+            if !self.config.host_name.is_empty() {
+                dhcp_msg.opts_mut().insert(v4::DhcpOption::Hostname(
+                    self.config.host_name.clone(),
+                ));
+            }
         } else if self.msg_type == DhcpV4MessageType::Release {
             if let Some(lease) = self.lease.as_ref() {
                 dhcp_msg.set_ciaddr(lease.yiaddr);
@@ -191,11 +199,6 @@ impl DhcpV4Message {
         dhcp_msg.opts_mut().insert(v4::DhcpOption::ClientIdentifier(
             self.config.client_id.clone(),
         ));
-        if self.config.use_host_name_as_client_id {
-            dhcp_msg.opts_mut().insert(v4::DhcpOption::Hostname(
-                self.config.host_name.clone(),
-            ));
-        }
 
         log::debug!("DHCP message {:?}", dhcp_msg);
 
