@@ -18,7 +18,7 @@ pub struct DhcpV4Config {
     pub(crate) client_id: Vec<u8>,
     pub(crate) host_name: String,
     // TODO: Support allow list and deny list for DHCP servers.
-    pub(crate) use_host_name_as_client_id: bool,
+    pub(crate) use_mac_as_client_id: bool,
     pub(crate) timeout: u32,
     pub(crate) socket_timeout: u32,
     pub(crate) is_proxy: bool,
@@ -32,7 +32,7 @@ impl Default for DhcpV4Config {
             src_mac: String::new(),
             client_id: Vec::new(),
             host_name: String::new(),
-            use_host_name_as_client_id: false,
+            use_mac_as_client_id: false,
             timeout: DEFAULT_TIMEOUT,
             socket_timeout: DEFAULT_SOCKET_TIMEOUT,
             is_proxy: false,
@@ -69,6 +69,10 @@ impl DhcpV4Config {
         self.iface_index = np_iface.index;
         if !self.is_proxy {
             self.src_mac = np_iface.mac_address;
+
+            if self.use_mac_as_client_id {
+                self.set_mac_as_client_id();
+            }
         }
         Ok(())
     }
@@ -94,8 +98,12 @@ impl DhcpV4Config {
     }
 
     pub fn use_mac_as_client_id(&mut self) -> &mut Self {
+        self.use_mac_as_client_id = true;
+        self
+    }
+
+    fn set_mac_as_client_id(&mut self) -> &mut Self {
         self.client_id = vec![ARP_HW_TYPE_ETHERNET];
-        self.use_host_name_as_client_id = false;
         self.client_id
             .append(&mut mac_str_to_u8_array(&self.src_mac));
         self
@@ -108,7 +116,6 @@ impl DhcpV4Config {
         // The RFC never mentioned the NULL terminator for string.
         // TODO: Need to check with dnsmasq implementation
         self.client_id.extend_from_slice(self.host_name.as_bytes());
-        self.use_host_name_as_client_id = true;
         self
     }
 }
